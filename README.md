@@ -29,6 +29,7 @@ This repository provides a platform-governed App that exposes exactly one tool: 
 ---
 
 ## Endpoints
+- `GET /` -> service metadata JSON (same as root response)
 - `GET /health` -> `{ "ok": true }`
 - `GET /mcp` -> tool definition (includes safety fuses)
 - `POST /mcp` -> tool invocation
