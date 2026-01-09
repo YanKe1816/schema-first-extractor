@@ -141,20 +141,6 @@ def health() -> Dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/")
-def root() -> Dict[str, str]:
-    return {
-        "service": APP_NAME,
-        "description": (
-            "Platform-governed MCP-compatible service exposing a single deterministic "
-            "extraction tool."
-        ),
-        "mcp_endpoint": "/mcp",
-        "health_endpoint": "/health",
-        "notes": "This service exposes no UI and performs no actions outside explicit tool invocation.",
-    }
-
-
 @app.get("/mcp")
 def mcp_definition() -> Dict[str, Any]:
     return {
