@@ -15,19 +15,6 @@ MAX_TEXT_LENGTH = 5000
 app = FastAPI(title=APP_NAME)
 
 
-@app.middleware("http")
-async def add_security_headers(request, call_next):
-    response = await call_next(request)
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
-        "form-action 'none'; connect-src 'self'"
-    )
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    return response
-
-
 class ToolInput(BaseModel):
     text: str
     schema: Dict[str, str]
@@ -62,10 +49,6 @@ def _validate_input(payload: ToolInput) -> Optional[Dict[str, Any]]:
 
 
 def _extract_string(field: str, text: str) -> Optional[str]:
-    if field == "email":
-        match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-        if match:
-            return match.group(0)
     patterns = [
         rf"{re.escape(field)}\s*:\s*([^,.;\n]+)",
         rf"{re.escape(field)}\s+is\s+([^,.;\n]+)",
@@ -86,6 +69,10 @@ def _extract_string(field: str, text: str) -> Optional[str]:
         match = re.search(r"works as\s+([^,.;\n]+)", text)
         if match:
             return match.group(1).strip()
+    if field == "email":
+        match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+        if match:
+            return match.group(0)
     if field == "phone":
         match = re.search(r"\b1\d{10}\b", text)
         if match:
