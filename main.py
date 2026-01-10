@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 APP_NAME = "schema-first-extractor"
@@ -11,6 +12,9 @@ TOOL_NAME = "extract_structured_json"
 
 ALLOWED_TYPES = {"string", "number", "boolean"}
 MAX_TEXT_LENGTH = 5000
+
+# ✅ 把这里替换成 OpenAI 页面给你的 Verification token（整串原样复制）
+OPENAI_DOMAIN_TOKEN = "urZHYFpX-2lek3zu--rvwNZEE6sRccCG-ZxPorffOLM"
 
 app = FastAPI(title=APP_NAME)
 
@@ -134,6 +138,12 @@ def extract_structured_json(payload: ToolInput) -> Dict[str, Any]:
             "notes": notes,
         },
     }
+
+
+# ✅ OpenAI 域名验证：必须返回纯文本 token（只一行）
+@app.get("/.well-known/openai-apps-challenge", include_in_schema=False)
+def openai_domain_verification() -> PlainTextResponse:
+    return PlainTextResponse(OPENAI_DOMAIN_TOKEN)
 
 
 @app.get("/health")
