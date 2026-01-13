@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -15,15 +15,22 @@ MAX_TEXT_LENGTH = 5000
 app = FastAPI(title=APP_NAME)
 
 
-# ---------- Your existing deterministic extractor ----------
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'none'; connect-src 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    return response
+
+
 class ToolInput(BaseModel):
     text: str
     schema: Dict[str, str]
-
-
-class MCPRequestSimple(BaseModel):
-    tool: str
-    input: ToolInput
 
 
 def _blocked(message: str) -> Dict[str, Any]:
@@ -50,6 +57,10 @@ def _validate_input(payload: ToolInput) -> Optional[Dict[str, Any]]:
 
 
 def _extract_string(field: str, text: str) -> Optional[str]:
+    if field == "email":
+        match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+        if match:
+            return match.group(0)
     patterns = [
         rf"{re.escape(field)}\s*:\s*([^,.;\n]+)",
         rf"{re.escape(field)}\s+is\s+([^,.;\n]+)",
@@ -70,10 +81,6 @@ def _extract_string(field: str, text: str) -> Optional[str]:
         match = re.search(r"works as\s+([^,.;\n]+)", text)
         if match:
             return match.group(1).strip()
-    if field == "email":
-        match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-        if match:
-            return match.group(0)
     if field == "phone":
         match = re.search(r"\b1\d{10}\b", text)
         if match:
@@ -137,7 +144,65 @@ def extract_structured_json(payload: ToolInput) -> Dict[str, Any]:
     }
 
 
-# ---------- Public endpoints ----------
+def _tool_definition() -> Dict[str, Any]:
+    return {
+        "name": TOOL_NAME,
+        "description": (
+            "Deterministic, heuristic, best-effort, non-exhaustive extraction of structured "
+            "JSON from messy human text according to a caller-provided simple schema. "
+            "Extraction only; no inference, evaluation, recommendations, or decisions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string",
+                        "enum": ["string", "number", "boolean"],
+                    },
+                },
+            },
+            "required": ["text", "schema"],
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "result": {
+                    "type": "object",
+                    "properties": {
+                        "data": {"type": "object"},
+                        "missing_fields": {"type": "array", "items": {"type": "string"}},
+                        "notes": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["data", "missing_fields", "notes"],
+                    "additionalProperties": False,
+                },
+                "error": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                        "message": {"type": "string"},
+                    },
+                    "required": ["code", "message"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "openWorldHint": False,
+            "destructiveHint": False,
+            "notes": "Read-only extraction with no external calls and no destructive actions.",
+        },
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, bool]:
     return {"ok": True}
@@ -161,144 +226,69 @@ def root() -> Dict[str, str]:
 
 @app.get("/mcp")
 def mcp_definition() -> Dict[str, Any]:
-    # Human-friendly definition (fine to keep)
     return {
         "app": APP_NAME,
-        "tool": {
-            "name": TOOL_NAME,
-            "description": (
-                "Deterministic, heuristic, best-effort, non-exhaustive extraction of structured "
-                "JSON from messy human text according to a caller-provided simple schema. "
-                "Extraction only; no inference, evaluation, recommendations, or decisions."
-            ),
-            "inputSchema": {  # NOTE: inputSchema (camelCase) is what many scanners expect
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "schema": {
-                        "type": "object",
-                        "additionalProperties": {"type": "string"},
-                        "description": "field -> string|number|boolean",
-                    },
-                },
-                "required": ["text", "schema"],
-            },
-            "outputSchema": {
-                "type": "object",
-                "properties": {
-                    "ok": {"type": "boolean"},
-                    "result": {"type": "object"},
-                    "error": {"type": "object"},
-                },
-                "required": ["ok"],
-            },
-            "annotations": {
-                "readOnlyHint": True,
-                "openWorldHint": False,
-                "destructiveHint": False,
-            },
-        },
+        "tool": _tool_definition(),
     }
-
-
-# ---------- MCP JSON-RPC compatibility (for Scan Tools) ----------
-class JSONRPCRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Union[int, str, None] = None
-    method: str
-    params: Optional[Dict[str, Any]] = None
-
-
-def _jsonrpc_ok(req_id: Union[int, str, None], result: Any) -> Dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": req_id, "result": result}
-
-
-def _jsonrpc_err(req_id: Union[int, str, None], code: int, message: str, data: Any = None) -> Dict[str, Any]:
-    err: Dict[str, Any] = {"code": code, "message": message}
-    if data is not None:
-        err["data"] = data
-    return {"jsonrpc": "2.0", "id": req_id, "error": err}
-
-
-TOOLS = [
-    {
-        "name": TOOL_NAME,
-        "description": (
-            "Deterministic extraction of structured JSON from messy text according to a caller-provided schema."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": {"type": "string"},
-                },
-            },
-            "required": ["text", "schema"],
-        },
-        "annotations": {
-            "readOnlyHint": True,
-            "openWorldHint": False,
-            "destructiveHint": False,
-        },
-    }
-]
 
 
 @app.post("/mcp")
 def mcp_invoke(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Supports BOTH:
-    A) Simple invoke: {"tool": "...", "input": {...}}  (your existing style)
-    B) JSON-RPC: {"jsonrpc":"2.0","id":1,"method":"tools/list"} (Scan Tools style)
-    """
-    # --- B) JSON-RPC path ---
-    if isinstance(payload, dict) and "method" in payload and "jsonrpc" in payload:
-        try:
-            req = JSONRPCRequest(**payload)
-        except Exception as e:
-            return _jsonrpc_err(None, -32600, "Invalid Request", {"detail": str(e)})
-
-        method = req.method
-        params = req.params or {}
-
-        if method == "initialize":
-            return _jsonrpc_ok(
-                req.id,
-                {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": APP_NAME, "version": "1.0.0"},
-                    "capabilities": {"tools": {}},
-                },
-            )
-
+    if payload.get("jsonrpc") == "2.0":
+        method = payload.get("method")
+        request_id = payload.get("id")
         if method == "tools/list":
-            return _jsonrpc_ok(req.id, {"tools": TOOLS})
-
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"tools": [_tool_definition()]},
+            }
         if method == "tools/call":
-            name = (params.get("name") or "").strip()
-            arguments = params.get("arguments") or {}
-            if name != TOOL_NAME:
-                return _jsonrpc_err(req.id, -32602, "Unknown tool", {"name": name})
-
+            params = payload.get("params", {})
+            if params.get("name") != TOOL_NAME:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": "Unknown tool."},
+                }
+            arguments = params.get("arguments", {})
             try:
                 tool_input = ToolInput(**arguments)
-            except Exception as e:
-                return _jsonrpc_err(req.id, -32602, "Invalid tool arguments", {"detail": str(e)})
-
+            except Exception:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32602, "message": "Invalid params."},
+                }
             result = extract_structured_json(tool_input)
-            # MCP tool result format: content array (safe and common)
-            return _jsonrpc_ok(req.id, {"content": [{"type": "text", "text": str(result)}]})
+            if result.get("ok") is True:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        **result,
+                        "content": [
+                            {"type": "json", "structuredContent": result},
+                            {"type": "text", "text": "ok"},
+                        ],
+                    },
+                }
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": "Unknown method."},
+        }
 
-        return _jsonrpc_err(req.id, -32601, "Method not found", {"method": method})
-
-    # --- A) Simple invoke path ---
-    try:
-        req2 = MCPRequestSimple(**payload)
-    except Exception as e:
-        return _invalid(f"Invalid request body. {e}")
-
-    if req2.tool != TOOL_NAME:
+    tool_name = payload.get("tool")
+    if tool_name != TOOL_NAME:
         return _invalid("Unknown tool.")
-    return extract_structured_json(req2.input)
+    input_payload = payload.get("input", {})
+    result = extract_structured_json(ToolInput(**input_payload))
+    if result.get("ok") is True:
+        return {
+            **result,
+            "structuredContent": result,
+            "content": [{"type": "text", "text": "ok"}],
+        }
+    return result
